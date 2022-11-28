@@ -1,0 +1,575 @@
+public class ReceiveEmailJob : IJob
+    {
+
+        #region 屬性
+
+        private static List<string> _filterSourceEmailAddressList = new List<string>();
+        /// <summary>
+        /// /// <summary>
+        /// 郵件源篩選條件
+        /// </summary>
+        /// </summary>
+        public static List<string> FilterSourceEmailAddressList
+        {
+            get { return ReceiveEmailJob._filterSourceEmailAddressList; }
+            set { ReceiveEmailJob._filterSourceEmailAddressList = value; }
+        }
+
+
+        //private static List<string> _filterThemeList = new List<string>();
+        ///// <summary>
+        ///// 主題篩選條件
+        ///// </summary>
+        //public static List<string> FilterThemeList
+        //{
+        //    get { return ReceiveEmailJob._filterThemeList; }
+        //    set { ReceiveEmailJob._filterThemeList = value; }
+        //}
+
+        #endregion
+
+        #region 輔助函數
+
+        #region eml
+        /// <summary>
+        /// 將MailMessage保存為eml檔
+        /// </summary>
+        /// <param name="msg">待保存的具有內容的MailMessage</param>
+        /// <param name="emlFileAbsolutePath">保存後的eml檔的路徑</param>
+        public static void SaveToEml(MailMessage msg, string emlFileAbsolutePath)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
+            using (MemoryStream ms = new MemoryStream())
+            {
+                Assembly assembly = typeof(System.Net.Mail.SmtpClient).Assembly;
+                Type tMailWriter = assembly.GetType("System.Net.Mail.MailWriter");
+                object mailWriter = Activator.CreateInstance(tMailWriter, flags, null, new object[] { ms }, CultureInfo.InvariantCulture);
+                msg.GetType().GetMethod("Send", flags).Invoke(msg, new object[] { mailWriter, true });
+                File.WriteAllText(emlFileAbsolutePath, System.Text.Encoding.Default.GetString(ms.ToArray()), System.Text.Encoding.Default);
+            }
+        }
+
+        #endregion
+
+        #region JMail
+        /// <summary>
+        ///  處理郵件
+        /// </summary>
+        /// <param name="Sys_AppID">企業標識</param>
+        /// <param name="EnterpriseAndEmailRelationshipID">郵箱配置標識</param>
+        /// <param name="emailAddress">郵箱地址</param>
+        /// <param name="jmsg">郵件物件</param>
+        /// <param name="messageid">郵件標識</param>        
+        /// <param name="savePath">附件保存目錄</param>
+        /// <returns>處理結果 true：成功 false：失敗</returns>
+        public static bool HandlEmailByJEmail(string emailAddress, jmail.Message jmsg, string messageid, string savePath)
+        {
+            bool ret = false;
+            try
+            {
+                using (TransactionScope ts = new TransactionScope(TransactionScopeOption.Required, new TransactionOptions() { IsolationLevel = IsolationLevel.ReadUncommitted }))
+                {
+                    DateTime currTime = DateTime.Now;
+                    jmail.Attachments atts = jmsg.Attachments;  //取得該郵件的附件集合 
+                    jmsg.Charset = "GB2312";                    //設置郵件的編碼方式 
+                    jmsg.Encoding = "base64";                   //設置郵件的附件編碼方式 
+                    jmsg.ISOEncodeHeaders = false;              //是否將信頭編碼成iso-8859-1字元集   
+                    jmsg.ContentType = "text/html";
+                    byte priority = jmsg.Priority;              //優先順序
+                    string mailfrom = jmsg.From.ToLower();      //寄件者地址
+                    string fromname = jmsg.FromName;            //寄件者
+                    string mailto = emailAddress;      //收件人地址
+                    string subject = jmsg.Subject.ToLower();    //主題
+                    string body = jmsg.Body;                    //內容                
+                    string receiveTime = jmsg.Date.ToString("yyyy-MM-dd HH:mm:ss");//接收時間
+                    int bodysize = jmsg.Size;                //內容大小
+                    string fileName = string.Empty;
+                    string saveFilename = string.Empty;
+                    var _workEmail = new WorkEmail
+                    {
+                        WorkEmailID = ToolsHelper.AutoGuidID,
+                        FromEmailAddress = mailfrom,
+                        ToEmailAddress = mailto,
+                        Subject = subject,
+                        EmailContent = body,
+                        EmailType = 1,
+                        ReceiveTime = ConvertData.ConvertToDateTime(receiveTime),
+                        CreateTime = currTime,
+                        IsDel = false,
+                        // EnterpriseAndEmailRelationshipID = EnterpriseAndEmailRelationshipID,
+                        OperationTime = currTime,
+                        //  Sys_AppID = Sys_AppID
+                    };
+                    _workEmail.Insert();
+
+                    //收附件    
+                    if (atts.Count > 0)
+                    {
+
+                        ToolsHelper.GetPath(savePath);
+                        for (int i = 0; i < atts.Count; i++)
+                        {
+                            jmail.Attachment at = jmsg.Attachments[i];
+                            fileName = HttpUtility.UrlDecode(at.Name);
+                            saveFilename = Path.Combine(savePath, $"{Path.GetFileNameWithoutExtension(fileName)}_{ToolsHelper.AutoGuidID}{Path.GetExtension(fileName)}");
+                            at.SaveToFile(saveFilename);
+                            ToolsHelper.OutLogInfo($"郵件ID：{messageid} 下載附件名稱：{fileName} 路徑：{saveFilename}");
+                            new WorkEmailFile
+                            {
+                                WorkEmailFileID = ToolsHelper.AutoGuidID,
+                                WorkEmailID = _workEmail.WorkEmailID,
+                                FileSourceName = fileName,
+                                FileSaveName = saveFilename,
+                                CreateTime = currTime,
+                                //  Sys_AppID = Sys_AppID
+                            }.Insert();
+                            //at.SaveToFile(@"D:\TestEmail\" + at.Name);
+                            //this.lsbmessage.Items.Add("附件名稱: " + at.Name);
+                            //this.lsbmessage.Items.Add("附件大小: " + at.Size + " bytes");
+                        }
+                    }
+                    ts.Complete();
+                    ret = true;
+                    ToolsHelper.OutLogInfo($"成功接收ID為{messageid}的 郵件");
+                }
+            }
+            catch (Exception ex)
+            {
+                ToolsHelper.OutLogInfo($"處理ID為{messageid}的 郵件異常：{Environment.NewLine}{ ex.Message}", ToolsHelper.LogLevelInfo.Error);
+                ret = false;
+            }
+            finally
+            {
+                ToolsHelper.FlushMemory();
+            }
+
+            return ret;
+        }
+
+        /// <summary>
+        /// JMail 方式收郵件
+        /// </summary>
+        /// <param name="Sys_AppID">企業標識</param>
+        /// <param name="EnterpriseAndEmailRelationshipID">郵箱配置標識</param>
+        /// <param name="emailAddress">郵箱地址</param>
+        /// <param name="emailPwd">郵箱密碼</param>
+        /// <param name="pop3Server">POP3地址</param>
+        /// <param name="Timeout">超時時間（s）</param>
+        /// <param name="SaveFilePath">附件存儲路徑</param>
+        /// <param name="EnableSSl">啟用SSL方式</param>
+        /// <param name="POPProt">SSL方式POP埠號</param>
+        /// <param name="IsDeleteEmail">收完郵件，清理收件箱</param>
+        public static void ReceiveEmailByJEmail(string emailAddress, string emailPwd, string pop3Server, int Timeout, string SaveFilePath, bool EnableSSl = false, int POPProt = 110, bool IsDeleteEmail = false)
+        {
+            jmail.POP3Class jpop = new jmail.POP3Class();
+            try
+            {
+                var EmailDownloadList = TaskJobHelper.GetEmailDownloadList(emailAddress);
+                //設置連接逾時時間
+                jpop.Timeout = Timeout;
+                jpop.Connect(emailAddress, emailPwd, pop3Server, POPProt);
+                //提取未讀郵件
+                jpop.DownloadUnreadMessages();
+                //jpop.DownloadMessages();
+                ToolsHelper.OutLogInfo($"未讀郵件數為:{jpop.Count}");
+
+                jmail.Message msg = new jmail.Message();
+                if (jpop.Count > 0)
+                {
+                    for (int i = 1; i <= jpop.Count; i++)
+                    {
+                        try
+                        {
+                            string MessageUID = jpop.GetMessageUID(i);
+                            if (!EmailDownloadList.Contains(MessageUID))
+                            {
+                                //添加已接收郵件靜態清單
+                                EmailDownloadList.Add(MessageUID);
+                                //寫已接收郵件登記文件
+                                TaskJobHelper.AddEmailDownloadList(emailAddress, MessageUID);
+
+                                try
+                                {
+                                    msg = jpop.Messages[i];//DownloadSingleMessage(i);//取得一條郵件資訊  
+                                    //處理成功
+                                    if (HandlEmailByJEmail(emailAddress, msg, MessageUID, SaveFilePath))
+                                    {
+                                        //開啟郵件自動清理功能
+                                        if (IsDeleteEmail)
+                                        {
+                                            try
+                                            {
+                                                //刪除郵件
+                                                jpop.DeleteSingleMessage(i);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                ToolsHelper.OutLogInfo($"刪除ID為{MessageUID}的 郵件異常：{Environment.NewLine}{ex.Message}", ToolsHelper.LogLevelInfo.Error);
+                                            }
+                                        }
+                                    }
+
+                                }
+                                catch (Exception ex)
+                                {
+                                    ToolsHelper.OutLogInfo($"提取郵件ID為{0}的 郵件異常：{1}{2}", ToolsHelper.LogLevelInfo.Error, true, MessageUID, Environment.NewLine, ex.Message);
+                                    ToolsHelper.FlushMemory();
+                                }
+                                finally
+                                {
+                                    ToolsHelper.FlushMemory();
+                                }
+
+                            }
+                            else
+                            {
+                                ToolsHelper.OutLogInfo($"ID為{MessageUID}的 郵件已下載，跳過處理");
+                            }
+                        }
+                        catch (Exception e)
+                        {
+                            ToolsHelper.FlushMemory();
+                            continue;
+                        }
+                        finally
+                        {
+                            ToolsHelper.FlushMemory();
+                        }
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                ToolsHelper.OutLogInfo($"接收郵件任務任務異常：{ex.Message}", ToolsHelper.LogLevelInfo.Error);
+            }
+            finally
+            {
+                TaskJobHelper.ReceiveEmailIsBusy = false;
+                try
+                {
+                    jpop.Disconnect();
+                    ToolsHelper.FlushMemory();
+                }
+                catch (Exception ex2)
+                {
+                    ToolsHelper.OutLogInfo($"接收郵件任務任務異常：{ex2.Message}", ToolsHelper.LogLevelInfo.Error);
+                }
+            }
+        }
+
+        #endregion
+
+        #region LumiSoft
+        /// <summary>
+        /// LumiSoft 方式收郵件
+        /// </summary>
+        /// <param name="Sys_AppID">企業標識</param>
+        /// <param name="EnterpriseAndEmailRelationshipID">郵箱配置標識</param>
+        /// <param name="emailAddress">郵箱地址</param>
+        /// <param name="emailPwd">郵箱密碼</param>
+        /// <param name="pop3Server">POP3地址</param>
+        /// <param name="Timeout">超時時間（s）</param>
+        /// <param name="SaveFilePath">附件存儲路徑</param>
+        /// <param name="EnableSSl">啟用SSL方式</param>
+        /// <param name="POPProt">POP埠號</param>
+        /// <param name="IsDeleteEmail">收完郵件，清理收件箱</param>
+        [Obsolete]
+        public static void ReceiveEmailByLumiSoft(string emailAddress, string emailPwd, string pop3Server, int Timeout, string SaveFilePath, bool EnableSSl = false, int POPProt = 110, bool IsDeleteEmail = false)
+        {
+            // 需要首先設置這些資訊
+            string popServer = pop3Server;
+            int popPort = POPProt;
+            bool popUseSsl = EnableSSl;
+            string mail = emailAddress, pw = emailPwd;            
+            var gotEmailIds = TaskJobHelper.GetEmailDownloadList(emailAddress);
+            //解析從Pop3伺服器發送過來的郵件資訊
+            List<Mime> result = new List<Mime>();
+            using (POP3_Client pop3 = new POP3_Client())
+            {
+                // 與Pop3伺服器建立連接
+                try
+                {
+                    pop3.Connect(pop3Server, popPort, popUseSsl);
+                    // 驗證身份
+                    pop3.Authenticate(emailAddress, emailPwd, false);
+
+                    // 獲取郵件資訊清單
+
+                    POP3_ClientMessageCollection infos = pop3.Messages;
+
+                    int EMLcount = infos.Count;
+
+
+                    ToolsHelper.OutLogInfo($"郵件數量:{EMLcount}");
+
+                    foreach (POP3_ClientMessage info in infos)
+                    {
+                        //每封Email會有一個在Pop3伺服器範圍內唯一的Id,檢查這個Id是否存在就可以知道以前有沒有接收過這封郵件
+                        if (gotEmailIds.Contains(info.UID))
+                        {
+                            ToolsHelper.OutLogInfo($"ID為{info.UID}的 郵件已下載，跳過處理");
+                            continue;
+                        }
+                        //記錄這封郵件的Id
+                        gotEmailIds.Add(info.UID);
+                        TaskJobHelper.AddEmailDownloadList(emailAddress, info.UID);
+                        //獲取這封郵件的內容
+                        byte[] bytes = info.MessageToByte();
+                       
+
+                        //解析從Pop3伺服器發送過來的郵件資訊
+                        Mime mime = Mime.Parse(bytes);
+                        MimeEntity mainEntity = mime.MainEntity;
+
+                        result.Add(mime);
+                        string tt = gotEmailIds + "主旨:" + mime.MainEntity.Subject;
+                        string savefilepath = $@"{SaveFilePath}\{info.UID}.eml";
+                        mime.ToFile(savefilepath);
+                        ToolsHelper.OutLogInfo($"成功接收ID為{info.UID};主旨為:{mime.MainEntity.Subject}的 郵件");
+                        new t_bus_dispatch
+                        {
+                            UUID = ToolsHelper.GetFormCode() + ToolsHelper.GetRandomNString(1),//.GetTimeStamp(true).ToString(),
+                            path = savefilepath,
+                            type = 4,
+                            create_time = DateTime.Now,
+                            dis_status = 1
+                        }.Insert();
+                    }
+
+                }
+                catch (Exception ex)
+                {
+                    ToolsHelper.OutLogInfo($"異常資訊:{ex}", ToolsHelper.LogLevelInfo.Error);
+                }
+            }
+        }
+        #endregion
+
+        #region Vmime
+
+        /// <summary>
+        /// 處理郵件
+        /// </summary>
+        /// <param name="Sys_AppID">企業標識</param>
+        /// <param name="EnterpriseAndEmailRelationshipID">郵箱配置標識</param>
+        /// <param name="emailAddress">郵箱地址</param>
+        /// <param name="i_Email">郵件物件</param>
+        /// <param name="messageid">郵件標識</param>
+        /// <param name="savePath">附件保存目錄</param>
+        /// <param name="count"></param>
+        /// <returns>處理結果 true：成功 false：失敗</returns>
+        public static bool HandleEmailByVmime(string emailAddress, EmailParser i_Email, string messageid, string savePath, string subject)
+        {
+            bool ret = false;
+            try
+            {
+                using (TransactionScope ts = new TransactionScope(TransactionScopeOption.Required, new TransactionOptions() { IsolationLevel = IsolationLevel.ReadUncommitted }))
+                {
+
+                    MailMessage msg = new MailMessage();
+
+                    DateTime currTime = DateTime.Now;
+                    string mailfrom = i_Email.GetFrom()[0].ToLower();      //寄件者地址
+                    string fromname = i_Email.GetFrom()[1];            //寄件者
+                    List<string> iEmails = new List<string>();
+                    List<string> iNames = new List<string>();
+                    i_Email.GetTo(iEmails, iNames);
+                    string mailto = emailAddress;// string.Join(";", iEmails);      //收件人地址
+                    subject = i_Email.GetSubject() == null ? "" : i_Email.GetSubject();   //主題
+                    string body = i_Email.GetPlainText() == null ? "" : i_Email.GetPlainText(); //內容
+                    int s32_Timezone;
+                    string receiveTime = i_Email.GetDate(out s32_Timezone).ToString("yyyy-MM-dd HH:mm:ss");//接收時間
+                    int bodysize = (int)i_Email.GetSize();                //內容大小
+
+                    string fileName = string.Empty;
+                    string fileType = string.Empty;
+                    string saveFilename = string.Empty;
+                    byte[] u8_AttData;
+                    uint atts = i_Email.GetAttachmentCount();   //取得該郵件的附件集合 
+                    List<string> saveToFile = new List<string>();
+                    saveToFile.Add($"收信時間:{receiveTime}");
+                    saveToFile.Add($"寄件人:{fromname}");
+                    saveToFile.Add($"寄件地址:{mailfrom}");
+                    saveToFile.Add($"收件人地址:{mailto}");
+                    saveToFile.Add($"主旨:{subject}");
+                    saveToFile.Add($"內容:{body}");
+
+                    msg.Subject = subject;
+                    msg.From = new MailAddress(mailfrom);
+                    msg.To.Add(mailto);
+                    msg.Body = body;
+
+                    //var _workEmail = new WorkEmail
+                    //{
+                    //    WorkEmailID = ToolsHelper.AutoGuidID,
+                    //    FromEmailAddress = mailfrom,
+                    //    ToEmailAddress = mailto,
+                    //    Subject = subject,
+                    //    EmailContent = body,
+                    //    EmailType = 1,
+                    //    ReceiveTime = ConvertData.ConvertToDateTime(receiveTime),
+                    //    CreateTime = currTime,
+                    //    IsDel = false,
+                    //    //EnterpriseAndEmailRelationshipID = EnterpriseAndEmailRelationshipID,
+                    //    OperationTime = currTime,
+                    //    //Sys_AppID = Sys_AppID
+                    //};
+                    //_workEmail.Insert();
+                    if (atts > 0)
+                    {
+                        for (int i = 0; i < atts; i++)
+                        {
+                            fileName = string.Empty;
+                            fileType = string.Empty;
+                            saveFilename = string.Empty;
+                            u8_AttData = null;
+                            //獲取附件
+                            i_Email.GetAttachmentAt((uint)i, out fileName, out fileType, out u8_AttData);
+
+                            saveFilename = Path.Combine(savePath, $"{Path.GetFileNameWithoutExtension(fileName)}_{ToolsHelper.AutoGuidID}{Path.GetExtension(fileName)}");
+
+                            FileStream fs = new FileStream(saveFilename, FileMode.Create);
+                            //將byte陣列寫入檔中
+                            fs.Write(u8_AttData, 0, u8_AttData.Length);
+                            fs.Close();
+                            ToolsHelper.OutLogInfo($"郵件ID：{messageid};主旨為:{subject} 下載附件名稱：{fileName} 路徑：{saveFilename}");
+                            //new WorkEmailFile
+                            //{
+                            //    WorkEmailFileID = ToolsHelper.AutoGuidID,
+                            //    WorkEmailID = _workEmail.WorkEmailID,
+                            //    FileSourceName = fileName,
+                            //    FileSaveName = saveFilename,
+                            //    CreateTime = currTime,
+                            //    // Sys_AppID = Sys_AppID
+                            //}.Insert();
+
+                        }
+                    }
+
+                    //SaveToEml(msg, $@"C:\Users\WangNJ\Desktop\MAIL_TEST\{messageid}.eml");
+                    File.AppendAllLines($@"{savePath}\{messageid}.txt", saveToFile);
+
+                    ts.Complete();
+                    ret = true;
+                    ToolsHelper.OutLogInfo($"成功接收ID為{messageid};主旨為:{subject}的 郵件");
+                }
+            }
+            catch (Exception ex)
+            {
+                ToolsHelper.OutLogInfo($"處理ID為{messageid};主旨為:{subject}的 郵件異常：{Environment.NewLine}{ex.Message}", ToolsHelper.LogLevelInfo.Error);
+                ret = false;
+            }
+            finally
+            {
+                ToolsHelper.FlushMemory();
+            }
+
+            return ret;
+        }
+        /// <summary>
+        /// Vmime 方式收郵件
+        /// </summary>
+        /// <param name="Sys_AppID">企業標識</param>
+        /// <param name="EnterpriseAndEmailRelationshipID">郵箱配置標識</param>
+        /// <param name="emailAddress">郵箱地址</param>
+        /// <param name="emailPwd">郵箱密碼</param>
+        /// <param name="pop3Server">POP3地址</param>
+        /// <param name="Timeout">超時時間（s）</param>
+        /// <param name="SaveFilePath">附件存儲路徑</param>
+        /// <param name="EnableSSl">啟用SSL方式</param>
+        /// <param name="POPProt">POP埠號</param>
+        /// <param name="IsDeleteEmail">收完郵件，清理收件箱</param>
+        public static void ReceiveEmailByVmime(string emailAddress, string emailPwd, string pop3Server, int Timeout, string SaveFilePath, bool EnableSSl = false, int POPProt = 110, bool IsDeleteEmail = false)
+        {
+            Pop3 i_Pop3 = null;
+            try
+            {
+                var EmailDownloadList = TaskJobHelper.GetEmailDownloadList(emailAddress);
+                if (EnableSSl)
+                {
+                    i_Pop3 = new Pop3(pop3Server, (ushort)POPProt, Pop3.eSecurity.SSL, true);
+                }
+                else
+                {
+                    i_Pop3 = new Pop3(pop3Server, (ushort)POPProt, Pop3.eSecurity.Normal, true);
+                }
+                i_Pop3.SetAuthData(emailAddress, emailPwd);
+                int s32_EmailCount = i_Pop3.GetEmailCount();
+                ToolsHelper.OutLogInfo($"收件箱裡郵件數為:{s32_EmailCount}");
+                if (s32_EmailCount > 0)
+                {
+                    for (int M = s32_EmailCount - 1; M >= 0; M--)
+                    {
+                        using (EmailParser i_Email = i_Pop3.FetchEmailAt(M)) // Sends here the TOP command
+                        {
+                            string MessageUID = i_Email.GetUID();
+                            //新郵件
+                            if (!EmailDownloadList.Contains(MessageUID))
+                            {
+                                //添加已接收郵件靜態清單
+                                EmailDownloadList.Add(MessageUID);
+                                EmailDownloadList.Add(i_Email.GetSubject());
+                                //寫已接收郵件登記文件
+                                TaskJobHelper.AddEmailDownloadList(emailAddress, MessageUID);
+
+                                try
+                                {
+                                    //處理成功
+                                    if (HandleEmailByVmime(emailAddress, i_Email, MessageUID, SaveFilePath, i_Email.GetSubject()))
+                                    {
+
+                                        //開啟郵件自動清理功能
+                                        if (IsDeleteEmail)
+                                        {
+                                            try
+                                            {
+                                                //刪除郵件
+                                                i_Email.Delete();
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                ToolsHelper.OutLogInfo($"刪除ID為{MessageUID}的 郵件異常：{Environment.NewLine}{ ex.Message}", ToolsHelper.LogLevelInfo.Error);
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    ToolsHelper.OutLogInfo($"提取郵件ID為{MessageUID};主旨為:{i_Email.GetSubject()}的 郵件異常：{Environment.NewLine}{ex.Message}", ToolsHelper.LogLevelInfo.Error);
+                                }
+                                finally
+                                {
+                                    ToolsHelper.FlushMemory();
+                                }
+                            }
+                            else
+                            {
+                                ToolsHelper.OutLogInfo($"ID為{MessageUID};主旨為:{i_Email.GetSubject()}的 郵件已下載，跳過處理");
+                            }
+                        }
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                ToolsHelper.OutLogInfo($"接收郵件任務任務異常：{ex.Message}", ToolsHelper.LogLevelInfo.Error);
+            }
+            finally
+            {
+                TaskJobHelper.ReceiveEmailIsBusy = false;
+                try
+                {
+                    if (i_Pop3 != null)
+                    {
+                        i_Pop3.Close();
+                    }
+                    ToolsHelper.FlushMemory();
+                }
+                catch (Exception ex2)
+                {
+                    ToolsHelper.OutLogInfo($"接收郵件任務任務異常：{ex2.Message}", ToolsHelper.LogLevelInfo.Error);
+                }
+            }
+        }
